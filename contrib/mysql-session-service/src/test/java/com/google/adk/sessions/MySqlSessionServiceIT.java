@@ -291,4 +291,66 @@ public final class MySqlSessionServiceIT {
     assertThat(retrievedSession.state()).containsEntry(State.APP_PREFIX + "cleanAppKey", "val1");
     assertThat(retrievedSession.state()).containsEntry(State.USER_PREFIX + "cleanUserKey", "val2");
   }
+
+  @Test
+  public void removesKeysFromDb_integration() throws Exception {
+    Session session =
+        sessionService
+            .createSession("app", "user", new ConcurrentHashMap<>(), "session1")
+            .blockingGet();
+
+    // 1. Setup existing state in DB directly
+    try (Connection conn = dataSource.getConnection();
+        Statement stmt = conn.createStatement()) {
+      stmt.execute(
+          "INSERT INTO adk_app_state (app_name, state_key, state_value) VALUES ('app',"
+              + " 'keyToRemove', '\"val\"')");
+      stmt.execute(
+          "INSERT INTO adk_user_state (app_name, user_id, state_key, state_value) VALUES ('app',"
+              + " 'user', 'keyToRemove', '\"val\"')");
+    }
+
+    // 2. Create event with REMOVED delta
+    ConcurrentMap<String, Object> stateDelta = new ConcurrentHashMap<>();
+    stateDelta.put(State.APP_PREFIX + "keyToRemove", State.REMOVED);
+    stateDelta.put(State.USER_PREFIX + "keyToRemove", State.REMOVED);
+
+    Event event =
+        Event.builder()
+            .id(UUID.randomUUID().toString())
+            .actions(EventActions.builder().stateDelta(stateDelta).build())
+            .build();
+
+    sessionService.appendEvent(session, event).blockingGet();
+
+    // 3. Verify deletion in DB
+    try (Connection conn = dataSource.getConnection();
+        Statement stmt = conn.createStatement()) {
+
+      // Check App State
+      try (java.sql.ResultSet rs =
+          stmt.executeQuery(
+              "SELECT state_key FROM adk_app_state WHERE app_name = 'app' AND state_key ="
+                  + " 'keyToRemove'")) {
+        assertThat(rs.next()).isFalse();
+      }
+
+      // Check User State
+      try (java.sql.ResultSet rs =
+          stmt.executeQuery(
+              "SELECT state_key FROM adk_user_state WHERE app_name = 'app' AND user_id = 'user'"
+                  + " AND state_key = 'keyToRemove'")) {
+        assertThat(rs.next()).isFalse();
+      }
+    }
+
+    // 4. Verify retrieval does not have keys
+    Session retrievedSession =
+        sessionService
+            .getSession(session.appName(), session.userId(), session.id(), Optional.empty())
+            .blockingGet();
+
+    assertThat(retrievedSession.state()).doesNotContainKey(State.APP_PREFIX + "keyToRemove");
+    assertThat(retrievedSession.state()).doesNotContainKey(State.USER_PREFIX + "keyToRemove");
+  }
 }

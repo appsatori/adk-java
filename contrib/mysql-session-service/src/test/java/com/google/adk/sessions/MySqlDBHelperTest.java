@@ -376,4 +376,60 @@ class MySqlDBHelperTest {
       }
     }
   }
+
+  @Test
+  void prefixHandling_removesKeysFromDb() throws Exception {
+    // 1. Setup existing state in DB
+    try (Connection conn = dataSource.getConnection();
+        Statement stmt = conn.createStatement()) {
+      stmt.execute(
+          "INSERT INTO adk_app_state (app_name, state_key, state_value) VALUES ('testApp', 'keyToRemove', '\"val\"')");
+      stmt.execute(
+          "INSERT INTO adk_user_state (app_name, user_id, state_key, state_value) VALUES ('testApp', 'testUser', 'keyToRemove', '\"val\"')");
+    }
+
+    Session session =
+        Session.builder(UUID.randomUUID().toString())
+            .appName("testApp")
+            .userId("testUser")
+            .state(new ConcurrentHashMap<>())
+            .events(new ArrayList<>())
+            .lastUpdateTime(Instant.now().truncatedTo(ChronoUnit.MILLIS))
+            .build();
+
+    dbHelper.saveSession(session).blockingAwait();
+
+    // 2. Create event with REMOVED delta
+    ConcurrentMap<String, Object> stateDelta = new ConcurrentHashMap<>();
+    stateDelta.put(State.APP_PREFIX + "keyToRemove", State.REMOVED);
+    stateDelta.put(State.USER_PREFIX + "keyToRemove", State.REMOVED);
+
+    Event event =
+        Event.builder()
+            .id(UUID.randomUUID().toString())
+            .timestamp(System.currentTimeMillis())
+            .actions(EventActions.builder().stateDelta(stateDelta).build())
+            .build();
+
+    dbHelper.appendEventAndUpdateState(session, event).blockingAwait();
+
+    // 3. Verify deletion in DB
+    try (Connection conn = dataSource.getConnection();
+        Statement stmt = conn.createStatement()) {
+
+      // Check App State
+      try (java.sql.ResultSet rs =
+          stmt.executeQuery(
+              "SELECT state_key FROM adk_app_state WHERE app_name = 'testApp' AND state_key = 'keyToRemove'")) {
+        assertThat(rs.next()).isFalse(); // Should be gone
+      }
+
+      // Check User State
+      try (java.sql.ResultSet rs =
+          stmt.executeQuery(
+              "SELECT state_key FROM adk_user_state WHERE app_name = 'testApp' AND user_id = 'testUser' AND state_key = 'keyToRemove'")) {
+        assertThat(rs.next()).isFalse(); // Should be gone
+      }
+    }
+  }
 }
