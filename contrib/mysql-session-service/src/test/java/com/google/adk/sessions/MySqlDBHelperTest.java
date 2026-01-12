@@ -82,6 +82,7 @@ class MySqlDBHelperTest {
       stmt.execute(
           "CREATE TABLE adk_app_state ("
               + "app_name VARCHAR(255) NOT NULL, "
+<<<<<<< HEAD
               + "state_key VARCHAR(768) NOT NULL, "
               + "state_value TEXT, "
               + "PRIMARY KEY (app_name, state_key))");
@@ -322,5 +323,218 @@ class MySqlDBHelperTest {
     assertThat(sessions).hasSize(1);
     assertThat(sessions.get(0).state()).containsEntry("globalKey", "globalValue");
     assertThat(sessions.get(0).state()).containsEntry("userKey", "userValue");
+=======
+              + "state_key VARCHAR(255) NOT NULL, "
+              + "state_value TEXT, "
+              + "PRIMARY KEY (app_name, state_key))");
+
+      stmt.execute(
+          "CREATE TABLE adk_user_state ("
+              + "app_name VARCHAR(255) NOT NULL, "
+              + "user_id VARCHAR(255) NOT NULL, "
+              + "state_key VARCHAR(255) NOT NULL, "
+              + "state_value TEXT, "
+              + "PRIMARY KEY (app_name, user_id, state_key))");
+    }
+
+    dbHelper = new MySqlDBHelper(dataSource);
+  }
+
+  @AfterEach
+  void tearDown() {
+    if (dataSource instanceof HikariDataSource) {
+      ((HikariDataSource) dataSource).close();
+    }
+  }
+
+  @Test
+  void appendEvent_withAppState_executesSqlSuccessfully() {
+    // Create a session first
+    Session session =
+        Session.builder(UUID.randomUUID().toString())
+            .appName("testApp")
+            .userId("testUser")
+            .state(new ConcurrentHashMap<>())
+            .events(new ArrayList<>())
+            .lastUpdateTime(Instant.now().truncatedTo(ChronoUnit.MILLIS))
+            .build();
+
+    dbHelper.saveSession(session).blockingAwait();
+
+    // Create event with App State delta
+    ConcurrentMap<String, Object> stateDelta = new ConcurrentHashMap<>();
+    stateDelta.put(State.APP_PREFIX + "someKey", "someValue");
+
+    Event event =
+        Event.builder()
+            .id(UUID.randomUUID().toString())
+            .timestamp(System.currentTimeMillis())
+            .actions(EventActions.builder().stateDelta(stateDelta).build())
+            .build();
+
+    // This triggers the upsertAppStateSql.
+    // If there is a parameter mismatch (3 columns vs 4 placeholders), this will fail.
+    dbHelper.appendEventAndUpdateState(session, event).blockingAwait();
+
+    // Verify it was inserted
+    Single<ConcurrentHashMap<String, Object>> stateSingle =
+        dbHelper.getInitialState("testApp", "testUser");
+    ConcurrentHashMap<String, Object> state = stateSingle.blockingGet();
+    assertThat(state).containsEntry(State.APP_PREFIX + "someKey", "someValue");
+  }
+
+  @Test
+  void appendEvent_withUserState_executesSqlSuccessfully() {
+    // Create a session
+    Session session =
+        Session.builder(UUID.randomUUID().toString())
+            .appName("testApp")
+            .userId("testUser")
+            .state(new ConcurrentHashMap<>())
+            .events(new ArrayList<>())
+            .lastUpdateTime(Instant.now().truncatedTo(ChronoUnit.MILLIS))
+            .build();
+
+    dbHelper.saveSession(session).blockingAwait();
+
+    // Create event with User State delta
+    ConcurrentMap<String, Object> stateDelta = new ConcurrentHashMap<>();
+    stateDelta.put(State.USER_PREFIX + "someUserKey", "someUserValue");
+
+    Event event =
+        Event.builder()
+            .id(UUID.randomUUID().toString())
+            .timestamp(System.currentTimeMillis())
+            .actions(EventActions.builder().stateDelta(stateDelta).build())
+            .build();
+
+    dbHelper.appendEventAndUpdateState(session, event).blockingAwait();
+
+    // Verify it was inserted
+    ConcurrentHashMap<String, Object> state =
+        dbHelper.getInitialState("testApp", "testUser").blockingGet();
+    assertThat(state).containsEntry(State.USER_PREFIX + "someUserKey", "someUserValue");
+  }
+
+  @Test
+  void listSessions_retrievesSessionState() {
+    ConcurrentMap<String, Object> state = new ConcurrentHashMap<>();
+    state.put("key1", "value1");
+
+    Session session =
+        Session.builder(UUID.randomUUID().toString())
+            .appName("testApp")
+            .userId("testUser")
+            .state(state)
+            .events(new ArrayList<>())
+            .lastUpdateTime(Instant.now().truncatedTo(ChronoUnit.MILLIS))
+            .build();
+
+    dbHelper.saveSession(session).blockingAwait();
+
+    java.util.List<Session> sessions = dbHelper.listSessions("testApp", "testUser").blockingGet();
+
+    assertThat(sessions).hasSize(1);
+    assertThat(sessions.get(0).state()).containsEntry("key1", "value1");
+  }
+
+  @Test
+  void listEvents_enforcesOwnership() {
+    String sessionId = UUID.randomUUID().toString();
+    Session session =
+        Session.builder(sessionId)
+            .appName("correctApp")
+            .userId("correctUser")
+            .state(new ConcurrentHashMap<>())
+            .events(new ArrayList<>())
+            .lastUpdateTime(Instant.now().truncatedTo(ChronoUnit.MILLIS))
+            .build();
+
+    dbHelper.saveSession(session).blockingAwait();
+
+    Event event =
+        Event.builder()
+            .id(UUID.randomUUID().toString())
+            .timestamp(System.currentTimeMillis())
+            .build();
+
+    dbHelper.appendEventAndUpdateState(session, event).blockingAwait();
+
+    // 1. Correct credentials should return the event
+    java.util.List<Event> events =
+        dbHelper.listEvents("correctApp", "correctUser", sessionId).blockingGet();
+    assertThat(events).hasSize(1);
+
+    // 2. Wrong App Name should return empty
+    java.util.List<Event> eventsWrongApp =
+        dbHelper.listEvents("wrongApp", "correctUser", sessionId).blockingGet();
+    assertThat(eventsWrongApp).isEmpty();
+
+    // 3. Wrong User ID should return empty
+    java.util.List<Event> eventsWrongUser =
+        dbHelper.listEvents("correctApp", "wrongUser", sessionId).blockingGet();
+    assertThat(eventsWrongUser).isEmpty();
+  }
+
+  @Test
+  void getSession_mergesStateCorrectly() throws Exception {
+    // 1. Setup Global App State directly in DB
+    try (Connection conn = dataSource.getConnection();
+        Statement stmt = conn.createStatement()) {
+      stmt.execute(
+          "INSERT INTO adk_app_state (app_name, state_key, state_value) VALUES ('testApp', 'sharedKey', '\"globalValue\"')");
+      stmt.execute(
+          "INSERT INTO adk_app_state (app_name, state_key, state_value) VALUES ('testApp', 'globalOnly', '\"globalOnlyValue\"')");
+    }
+
+    // 2. Create Session with conflicting key
+    ConcurrentMap<String, Object> sessionState = new ConcurrentHashMap<>();
+    sessionState.put("sharedKey", "sessionValue");
+
+    Session session =
+        Session.builder(UUID.randomUUID().toString())
+            .appName("testApp")
+            .userId("testUser")
+            .state(sessionState)
+            .events(new ArrayList<>())
+            .lastUpdateTime(Instant.now().truncatedTo(ChronoUnit.MILLIS))
+            .build();
+
+    dbHelper.saveSession(session).blockingAwait();
+
+    // 3. Retrieve Session
+    Session retrievedSession =
+        dbHelper
+            .getSession("testApp", "testUser", session.id(), java.util.Optional.empty())
+            .blockingGet();
+
+    // 4. Verify Merge Logic
+    // Session-specific value should override Global value
+    assertThat(retrievedSession.state()).containsEntry("sharedKey", "sessionValue");
+    // Non-conflicting Global value should be present
+    assertThat(retrievedSession.state()).containsEntry("globalOnly", "globalOnlyValue");
+  }
+
+  @Test
+  void deleteSession_executesSqlSuccessfully() {
+    Session session =
+        Session.builder(UUID.randomUUID().toString())
+            .appName("testApp")
+            .userId("testUser")
+            .state(new ConcurrentHashMap<>())
+            .events(new ArrayList<>())
+            .lastUpdateTime(Instant.now().truncatedTo(ChronoUnit.MILLIS))
+            .build();
+
+    dbHelper.saveSession(session).blockingAwait();
+
+    dbHelper.deleteSession("testApp", "testUser", session.id()).blockingAwait();
+
+    Session deletedSession =
+        dbHelper
+            .getSession("testApp", "testUser", session.id(), java.util.Optional.empty())
+            .blockingGet();
+    assertThat(deletedSession).isNull();
+>>>>>>> refs/remotes/origin/signaturesatori
   }
 }

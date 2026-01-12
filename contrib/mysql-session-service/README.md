@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS adk_events (
 
 CREATE TABLE IF NOT EXISTS adk_app_state (
     app_name VARCHAR(255) NOT NULL,
+<<<<<<< HEAD
     state_key VARCHAR(768) NOT NULL,
     state_value JSON,
     PRIMARY KEY (app_name, state_key)
@@ -72,6 +73,17 @@ CREATE TABLE IF NOT EXISTS adk_user_state (
     app_name VARCHAR(255) NOT NULL,
     user_id VARCHAR(255) NOT NULL,
     state_key VARCHAR(768) NOT NULL,
+=======
+    state_key VARCHAR(255) NOT NULL,
+    state_value JSON,
+    PRIMARY KEY (app_name, state_key)
+);
+
+CREATE TABLE IF NOT EXISTS adk_user_state (
+    app_name VARCHAR(255) NOT NULL,
+    user_id VARCHAR(255) NOT NULL,
+    state_key VARCHAR(255) NOT NULL,
+>>>>>>> refs/remotes/origin/signaturesatori
     state_value JSON,
     PRIMARY KEY (app_name, user_id, state_key)
 );
