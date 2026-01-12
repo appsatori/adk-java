@@ -143,30 +143,32 @@ public class MySqlDBHelper {
 
                   if (key.startsWith(State.USER_PREFIX)) {
                     // User State
+                    String dbKey = key.substring(State.USER_PREFIX.length());
                     if (value == null || value == State.REMOVED) {
                       deleteUserStmt.setString(1, session.appName());
                       deleteUserStmt.setString(2, session.userId());
-                      deleteUserStmt.setString(3, key);
+                      deleteUserStmt.setString(3, dbKey);
                       deleteUserStmt.addBatch();
                     } else {
                       String valueJson = objectMapper.writeValueAsString(value);
                       upsertUserStmt.setString(1, session.appName());
                       upsertUserStmt.setString(2, session.userId());
-                      upsertUserStmt.setString(3, key);
+                      upsertUserStmt.setString(3, dbKey);
                       upsertUserStmt.setString(4, valueJson);
                       upsertUserStmt.setString(5, valueJson);
                       upsertUserStmt.addBatch();
                     }
                   } else if (key.startsWith(State.APP_PREFIX)) {
                     // App State
+                    String dbKey = key.substring(State.APP_PREFIX.length());
                     if (value == null || value == State.REMOVED) {
                       deleteAppStmt.setString(1, session.appName());
-                      deleteAppStmt.setString(2, key);
+                      deleteAppStmt.setString(2, dbKey);
                       deleteAppStmt.addBatch();
                     } else {
                       String valueJson = objectMapper.writeValueAsString(value);
                       upsertAppStmt.setString(1, session.appName());
-                      upsertAppStmt.setString(2, key);
+                      upsertAppStmt.setString(2, dbKey);
                       upsertAppStmt.setString(3, valueJson);
                       upsertAppStmt.setString(4, valueJson);
                       upsertAppStmt.addBatch();
@@ -285,7 +287,7 @@ public class MySqlDBHelper {
               try (ResultSet rs = pstmt.executeQuery()) {
                 while (rs.next()) {
                   finalState.put(
-                      rs.getString("state_key"),
+                      State.APP_PREFIX + rs.getString("state_key"),
                       objectMapper.readValue(rs.getString("state_value"), Object.class));
                 }
               }
@@ -301,7 +303,7 @@ public class MySqlDBHelper {
               try (ResultSet rs = pstmt.executeQuery()) {
                 while (rs.next()) {
                   finalState.put(
-                      rs.getString("state_key"),
+                      State.USER_PREFIX + rs.getString("state_key"),
                       objectMapper.readValue(rs.getString("state_value"), Object.class));
                 }
               }
@@ -421,7 +423,7 @@ public class MySqlDBHelper {
               try (ResultSet rs = pstmt.executeQuery()) {
                 while (rs.next()) {
                   globalState.put(
-                      rs.getString("state_key"),
+                      State.APP_PREFIX + rs.getString("state_key"),
                       objectMapper.readValue(rs.getString("state_value"), Object.class));
                 }
               }
@@ -437,7 +439,7 @@ public class MySqlDBHelper {
               try (ResultSet rs = pstmt.executeQuery()) {
                 while (rs.next()) {
                   globalState.put(
-                      rs.getString("state_key"),
+                      State.USER_PREFIX + rs.getString("state_key"),
                       objectMapper.readValue(rs.getString("state_value"), Object.class));
                 }
               }
@@ -495,7 +497,7 @@ public class MySqlDBHelper {
               try (ResultSet rs = pstmt.executeQuery()) {
                 while (rs.next()) {
                   initialState.put(
-                      rs.getString("state_key"),
+                      State.APP_PREFIX + rs.getString("state_key"),
                       objectMapper.readValue(rs.getString("state_value"), Object.class));
                 }
               }
@@ -511,7 +513,7 @@ public class MySqlDBHelper {
               try (ResultSet rs = pstmt.executeQuery()) {
                 while (rs.next()) {
                   initialState.put(
-                      rs.getString("state_key"),
+                      State.USER_PREFIX + rs.getString("state_key"),
                       objectMapper.readValue(rs.getString("state_value"), Object.class));
                 }
               }

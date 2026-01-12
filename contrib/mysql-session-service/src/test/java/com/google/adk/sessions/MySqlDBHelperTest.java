@@ -82,7 +82,7 @@ class MySqlDBHelperTest {
       stmt.execute(
           "CREATE TABLE adk_app_state ("
               + "app_name VARCHAR(255) NOT NULL, "
-              + "state_key VARCHAR(768) NOT NULL, "
+              + "state_key VARCHAR(255) NOT NULL, "
               + "state_value TEXT, "
               + "PRIMARY KEY (app_name, state_key))");
 
@@ -90,7 +90,7 @@ class MySqlDBHelperTest {
           "CREATE TABLE adk_user_state ("
               + "app_name VARCHAR(255) NOT NULL, "
               + "user_id VARCHAR(255) NOT NULL, "
-              + "state_key VARCHAR(768) NOT NULL, "
+              + "state_key VARCHAR(255) NOT NULL, "
               + "state_value TEXT, "
               + "PRIMARY KEY (app_name, user_id, state_key))");
     }
@@ -269,8 +269,12 @@ class MySqlDBHelperTest {
     // 4. Verify Merge Logic
     // Session-specific value should override Global value
     assertThat(retrievedSession.state()).containsEntry("sharedKey", "sessionValue");
-    // Non-conflicting Global value should be present
-    assertThat(retrievedSession.state()).containsEntry("globalOnly", "globalOnlyValue");
+    // Non-conflicting Global value should be present with prefix
+    assertThat(retrievedSession.state())
+        .containsEntry(State.APP_PREFIX + "globalOnly", "globalOnlyValue");
+    // The shared key from global state should also be present with prefix
+    assertThat(retrievedSession.state())
+        .containsEntry(State.APP_PREFIX + "sharedKey", "globalValue");
   }
 
   @Test
@@ -320,7 +324,56 @@ class MySqlDBHelperTest {
     java.util.List<Session> sessions = dbHelper.listSessions("testApp", "testUser").blockingGet();
 
     assertThat(sessions).hasSize(1);
-    assertThat(sessions.get(0).state()).containsEntry("globalKey", "globalValue");
-    assertThat(sessions.get(0).state()).containsEntry("userKey", "userValue");
+    assertThat(sessions.get(0).state())
+        .containsEntry(State.APP_PREFIX + "globalKey", "globalValue");
+    assertThat(sessions.get(0).state()).containsEntry(State.USER_PREFIX + "userKey", "userValue");
+  }
+
+  @Test
+  void prefixHandling_storesCleanKeysInDb() throws Exception {
+    Session session =
+        Session.builder(UUID.randomUUID().toString())
+            .appName("testApp")
+            .userId("testUser")
+            .state(new ConcurrentHashMap<>())
+            .events(new ArrayList<>())
+            .lastUpdateTime(Instant.now().truncatedTo(ChronoUnit.MILLIS))
+            .build();
+
+    dbHelper.saveSession(session).blockingAwait();
+
+    ConcurrentMap<String, Object> stateDelta = new ConcurrentHashMap<>();
+    stateDelta.put(State.APP_PREFIX + "cleanAppKey", "val1");
+    stateDelta.put(State.USER_PREFIX + "cleanUserKey", "val2");
+
+    Event event =
+        Event.builder()
+            .id(UUID.randomUUID().toString())
+            .timestamp(System.currentTimeMillis())
+            .actions(EventActions.builder().stateDelta(stateDelta).build())
+            .build();
+
+    dbHelper.appendEventAndUpdateState(session, event).blockingAwait();
+
+    // Verify DB storage directly
+    try (Connection conn = dataSource.getConnection();
+        Statement stmt = conn.createStatement()) {
+
+      // Check App State
+      try (java.sql.ResultSet rs =
+          stmt.executeQuery(
+              "SELECT state_key FROM adk_app_state WHERE app_name = 'testApp' AND state_key = 'cleanAppKey'")) {
+        assertThat(rs.next()).isTrue();
+        assertThat(rs.getString("state_key")).isEqualTo("cleanAppKey"); // Should NOT have prefix
+      }
+
+      // Check User State
+      try (java.sql.ResultSet rs =
+          stmt.executeQuery(
+              "SELECT state_key FROM adk_user_state WHERE app_name = 'testApp' AND user_id = 'testUser' AND state_key = 'cleanUserKey'")) {
+        assertThat(rs.next()).isTrue();
+        assertThat(rs.getString("state_key")).isEqualTo("cleanUserKey"); // Should NOT have prefix
+      }
+    }
   }
 }

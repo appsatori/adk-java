@@ -98,7 +98,7 @@ public final class MySqlSessionServiceIT {
       stmt.execute(
           "CREATE TABLE adk_app_state ("
               + "app_name VARCHAR(255) NOT NULL, "
-              + "state_key VARCHAR(768) NOT NULL, "
+              + "state_key VARCHAR(255) NOT NULL, "
               + "state_value JSON, "
               + "PRIMARY KEY (app_name, state_key))");
 
@@ -106,7 +106,7 @@ public final class MySqlSessionServiceIT {
           "CREATE TABLE adk_user_state ("
               + "app_name VARCHAR(255) NOT NULL, "
               + "user_id VARCHAR(255) NOT NULL, "
-              + "state_key VARCHAR(768) NOT NULL, "
+              + "state_key VARCHAR(255) NOT NULL, "
               + "state_value JSON, "
               + "PRIMARY KEY (app_name, user_id, state_key))");
     }
@@ -238,5 +238,57 @@ public final class MySqlSessionServiceIT {
     // This asserts that the list operation merged the global state correctly
     assertThat(listedSession.state()).containsEntry(State.APP_PREFIX + "appKey", "appValue");
     assertThat(listedSession.state()).containsEntry(State.USER_PREFIX + "userKey", "userValue");
+  }
+
+  @Test
+  public void storesCleanKeysInDb_integration() throws Exception {
+    Session session =
+        sessionService
+            .createSession("app", "user", new ConcurrentHashMap<>(), "session1")
+            .blockingGet();
+
+    ConcurrentMap<String, Object> stateDelta = new ConcurrentHashMap<>();
+    stateDelta.put(State.APP_PREFIX + "cleanAppKey", "val1");
+    stateDelta.put(State.USER_PREFIX + "cleanUserKey", "val2");
+
+    Event event =
+        Event.builder()
+            .id(UUID.randomUUID().toString())
+            .actions(EventActions.builder().stateDelta(stateDelta).build())
+            .build();
+
+    sessionService.appendEvent(session, event).blockingGet();
+
+    // Verify DB storage directly
+    try (Connection conn = dataSource.getConnection();
+        Statement stmt = conn.createStatement()) {
+
+      // Check App State
+      try (java.sql.ResultSet rs =
+          stmt.executeQuery(
+              "SELECT state_key FROM adk_app_state WHERE app_name = 'app' AND state_key ="
+                  + " 'cleanAppKey'")) {
+        assertThat(rs.next()).isTrue();
+        assertThat(rs.getString("state_key")).isEqualTo("cleanAppKey"); // Should NOT have prefix
+      }
+
+      // Check User State
+      try (java.sql.ResultSet rs =
+          stmt.executeQuery(
+              "SELECT state_key FROM adk_user_state WHERE app_name = 'app' AND user_id = 'user'"
+                  + " AND state_key = 'cleanUserKey'")) {
+        assertThat(rs.next()).isTrue();
+        assertThat(rs.getString("state_key")).isEqualTo("cleanUserKey"); // Should NOT have prefix
+      }
+    }
+
+    // Verify retrieval adds prefix back
+    Session retrievedSession =
+        sessionService
+            .getSession(session.appName(), session.userId(), session.id(), Optional.empty())
+            .blockingGet();
+
+    assertThat(retrievedSession.state()).containsEntry(State.APP_PREFIX + "cleanAppKey", "val1");
+    assertThat(retrievedSession.state()).containsEntry(State.USER_PREFIX + "cleanUserKey", "val2");
   }
 }
