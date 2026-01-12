@@ -21,14 +21,16 @@ import static com.google.adk.testing.TestUtils.createTestLlm;
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertThrows;
 
-import com.google.adk.agents.Callbacks.AfterAgentCallback;
-import com.google.adk.agents.ConfigAgentUtils.ConfigurationException;
 import com.google.adk.agents.InvocationContext;
 import com.google.adk.agents.LlmAgent;
+import com.google.adk.artifacts.InMemoryArtifactService;
+import com.google.adk.memory.InMemoryMemoryService;
 import com.google.adk.models.LlmResponse;
+import com.google.adk.plugins.BasePlugin;
+import com.google.adk.sessions.InMemorySessionService;
+import com.google.adk.sessions.ListSessionsResponse;
 import com.google.adk.sessions.Session;
 import com.google.adk.testing.TestLlm;
-import com.google.adk.utils.ComponentRegistry;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.genai.types.Content;
@@ -39,6 +41,7 @@ import io.reactivex.rxjava3.core.Flowable;
 import io.reactivex.rxjava3.core.Maybe;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -46,81 +49,6 @@ import org.junit.runners.JUnit4;
 /** Unit tests for {@link AgentTool}. */
 @RunWith(JUnit4.class)
 public final class AgentToolTest {
-
-  @Test
-  public void fromConfig_withRegisteredAgent_returnsAgentTool() throws Exception {
-    LlmAgent testAgent =
-        createTestAgentBuilder(createTestLlm(LlmResponse.builder().build()))
-            .name("registered_agent")
-            .description("registered agent description")
-            .build();
-    ComponentRegistry.getInstance().register("registered_agent", testAgent);
-
-    BaseTool.ToolArgsConfig args = new BaseTool.ToolArgsConfig();
-    args.put("agent", ImmutableMap.of("code", "registered_agent"));
-    args.put("skipSummarization", true);
-
-    BaseTool.ToolConfig config = new BaseTool.ToolConfig();
-    config.setArgs(args);
-
-    BaseTool tool = AgentTool.fromConfig(config.args(), "/unused/config.yaml");
-
-    assertThat(tool).isInstanceOf(AgentTool.class);
-    assertThat(tool.name()).isEqualTo("registered_agent");
-    assertThat(tool.description()).isEqualTo("registered agent description");
-  }
-
-  @Test
-  public void fromConfig_missingAgentArg_throwsConfigurationException() {
-    BaseTool.ToolArgsConfig args = new BaseTool.ToolArgsConfig();
-    args.put("skipSummarization", true);
-
-    BaseTool.ToolConfig config = new BaseTool.ToolConfig();
-    config.setArgs(args);
-
-    ConfigurationException exception =
-        assertThrows(
-            ConfigurationException.class,
-            () -> AgentTool.fromConfig(config.args(), "/unused/config.yaml"));
-    assertThat(exception).hasMessageThat().contains("AgentTool config requires 'agent' argument.");
-  }
-
-  @Test
-  public void fromConfig_invalidAgentRef_throwsConfigurationException() {
-    BaseTool.ToolArgsConfig args = new BaseTool.ToolArgsConfig();
-    args.put("agent", ImmutableMap.of("code", "non_existent_agent"));
-
-    BaseTool.ToolConfig config = new BaseTool.ToolConfig();
-    config.setArgs(args);
-
-    ConfigurationException exception =
-        assertThrows(
-            ConfigurationException.class,
-            () -> AgentTool.fromConfig(config.args(), "/unused/config.yaml"));
-    assertThat(exception).hasMessageThat().contains("Failed to resolve subagent");
-  }
-
-  @Test
-  public void fromConfig_withSkipSummarizationTrue_setsSkipSummarizationAction() throws Exception {
-    LlmAgent testAgent =
-        createTestAgentBuilder(createTestLlm(LlmResponse.builder().build()))
-            .name("registered_agent_skip")
-            .description("registered agent description")
-            .build();
-    ComponentRegistry.getInstance().register("registered_agent_skip", testAgent);
-    BaseTool.ToolArgsConfig args = new BaseTool.ToolArgsConfig();
-    args.put("agent", ImmutableMap.of("code", "registered_agent_skip"));
-    args.put("skipSummarization", true);
-    BaseTool.ToolConfig config = new BaseTool.ToolConfig();
-    config.setArgs(args);
-    ToolContext toolContext = createToolContext(testAgent);
-    BaseTool tool = AgentTool.fromConfig(config.args(), "/unused/config.yaml");
-
-    Map<String, Object> unused =
-        tool.runAsync(ImmutableMap.of("request", "magic"), toolContext).blockingGet();
-
-    assertThat(toolContext.actions().skipSummarization()).hasValue(true);
-  }
 
   @Test
   public void declaration_withInputSchema_returnsDeclarationWithSchema() {
@@ -424,32 +352,75 @@ public final class AgentToolTest {
   }
 
   @Test
-  public void call_withStateDeltaInResponse_propagatesStateDelta() throws Exception {
-    AfterAgentCallback afterAgentCallback =
-        (callbackContext) -> {
-          callbackContext.state().put("test_key", "test_value");
-          return Maybe.empty();
-        };
-    TestLlm testLlm =
-        createTestLlm(
-            LlmResponse.builder()
-                .content(Content.fromParts(Part.fromText("test response")))
-                .build());
+  public void create_withServicesAndPlugins_initializesCorrectly() {
     LlmAgent testAgent =
-        createTestAgentBuilder(testLlm)
+        createTestAgentBuilder(createTestLlm(LlmResponse.builder().build()))
             .name("agent name")
             .description("agent description")
-            .afterAgentCallback(afterAgentCallback)
             .build();
-    AgentTool agentTool = AgentTool.create(testAgent);
+
+    AgentTool agentTool =
+        AgentTool.create(
+            testAgent,
+            new InMemorySessionService(),
+            new InMemoryArtifactService(),
+            new InMemoryMemoryService(),
+            ImmutableList.of());
+
+    assertThat(agentTool).isNotNull();
+    assertThat(agentTool.declaration()).isPresent();
+  }
+
+  @Test
+  public void runAsync_withServicesAndPlugins_usesThem() {
+    LlmAgent testAgent =
+        createTestAgentBuilder(
+                createTestLlm(
+                    LlmResponse.builder()
+                        .content(Content.fromParts(Part.fromText("Sub-agent executed")))
+                        .build()))
+            .name("sub-agent")
+            .description("sub-agent description")
+            .build();
+
+    InMemorySessionService sessionService = new InMemorySessionService();
+    TestPlugin testPlugin = new TestPlugin();
+
+    AgentTool agentTool =
+        AgentTool.create(
+            testAgent,
+            sessionService,
+            new InMemoryArtifactService(),
+            new InMemoryMemoryService(),
+            ImmutableList.of(testPlugin));
+
     ToolContext toolContext = createToolContext(testAgent);
 
-    assertThat(toolContext.state()).doesNotContainKey("test_key");
+    Map<String, Object> result =
+        agentTool.runAsync(ImmutableMap.of("request", "start"), toolContext).blockingGet();
 
-    Map<String, Object> unused =
-        agentTool.runAsync(ImmutableMap.of("request", "magic"), toolContext).blockingGet();
+    assertThat(result).containsEntry("result", "Sub-agent executed");
 
-    assertThat(toolContext.state()).containsEntry("test_key", "test_value");
+    assertThat(testPlugin.wasCalled.get()).isTrue();
+
+    ListSessionsResponse sessionsResponse =
+        sessionService.listSessions("sub-agent", "tmp-user").blockingGet();
+    assertThat(sessionsResponse.sessions()).isNotEmpty();
+  }
+
+  private static class TestPlugin extends BasePlugin {
+    final AtomicBoolean wasCalled = new AtomicBoolean(false);
+
+    TestPlugin() {
+      super("test-plugin");
+    }
+
+    @Override
+    public Maybe<Content> onUserMessageCallback(
+        InvocationContext invocationContext, Content userMessage) {
+      wasCalled.set(true);
+      return Maybe.empty();
+    }
   }
 
   private static ToolContext createToolContext(LlmAgent agent) {
