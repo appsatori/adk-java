@@ -129,7 +129,6 @@ public class MySqlSessionService implements BaseSessionService {
     if (event == null) {
       return Single.error(new IllegalArgumentException("event cannot be null."));
     }
-<<<<<<< HEAD
 
     // If the event indicates it's partial or incomplete, don't process it yet.
     if (event.partial().orElse(false)) {
@@ -142,14 +141,6 @@ public class MySqlSessionService implements BaseSessionService {
     return dbHelper
         .appendEventAndUpdateState(session, event)
         .andThen(BaseSessionService.super.appendEvent(session, event));
-=======
-    // The default implementation in BaseSessionService modifies the session object in memory.
-    // We call it first to get that behavior.
-    BaseSessionService.super.appendEvent(session, event);
-
-    // Now, persist the new event and update state transactionally.
-    return dbHelper.appendEventAndUpdateState(session, event).toSingleDefault(event);
->>>>>>> refs/remotes/origin/signaturesatori
   }
 
   private Completable validateAppAndUser(String appName, String userId) {
