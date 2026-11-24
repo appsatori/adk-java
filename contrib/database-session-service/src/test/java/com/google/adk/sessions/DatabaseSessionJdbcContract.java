@@ -34,6 +34,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
@@ -62,6 +63,9 @@ final class DatabaseSessionJdbcContract {
             dynamicTest(
                 "publication preserves unrelated writes during commit",
                 this::liveWriteDuringCommit),
+            dynamicTest(
+                "concurrent appends to one session wait for publication",
+                this::concurrentAppendsToOneSession),
             dynamicTest("local append takes no shared-row write lock", this::localQueries),
             dynamicTest(
                 "append without a local delta leaves the state document untouched",
@@ -419,6 +423,61 @@ final class DatabaseSessionJdbcContract {
       assertThat(session.state().get("unrelated")).isSameInstanceAs(pending);
       assertThat(session.state()).containsEntry("value", "new");
       assertThat(load(session).state()).containsEntry("value", "new");
+    } finally {
+      release.countDown();
+      executor.shutdownNow();
+      assertThat(executor.awaitTermination(20, TimeUnit.SECONDS)).isTrue();
+    }
+  }
+
+  private void concurrentAppendsToOneSession() throws Exception {
+    Session session = create(service(source));
+    JdbcProbe probe = new JdbcProbe(source, dialect);
+    DatabaseSessionService service = service(probe);
+    Event first = DatabaseSessionContract.event("first", 1, Map.of("value", "first"));
+    Event second = DatabaseSessionContract.event("second", 2, Map.of("value", "second"));
+    var executor = Executors.newFixedThreadPool(2);
+    CountDownLatch committed = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    CountDownLatch secondStarted = new CountDownLatch(1);
+    AtomicBoolean firstCommit = new AtomicBoolean(true);
+    probe.hook =
+        (sql, after) -> {
+          if (after && sql.equals("COMMIT") && firstCommit.compareAndSet(true, false)) {
+            committed.countDown();
+            if (!release.await(20, TimeUnit.SECONDS)) {
+              throw new AssertionError("Publication barrier timed out");
+            }
+          }
+        };
+    try {
+      var firstAppend = executor.submit(() -> service.appendEvent(session, first).blockingGet());
+      assertThat(committed.await(20, TimeUnit.SECONDS)).isTrue();
+      assertThat(session.immutableEvents()).isEmpty();
+      var secondAppend =
+          executor.submit(
+              () -> {
+                secondStarted.countDown();
+                return service.appendEvent(session, second).blockingGet();
+              });
+      assertThat(secondStarted.await(20, TimeUnit.SECONDS)).isTrue();
+      // The database already has "first", but the shared Session still has its old tail.
+      // The next append must wait for publication instead of failing the stale-writer check.
+      assertThrows(TimeoutException.class, () -> secondAppend.get(1, TimeUnit.SECONDS));
+      release.countDown();
+      assertThat(firstAppend.get(20, TimeUnit.SECONDS)).isSameInstanceAs(first);
+      assertThat(secondAppend.get(20, TimeUnit.SECONDS)).isSameInstanceAs(second);
+      assertThat(session.immutableEvents().stream().map(Event::id).toList())
+          .containsExactly("first", "second")
+          .inOrder();
+      assertThat(session.state()).containsEntry("value", "second");
+      Session reloaded = load(session);
+      assertThat(reloaded.immutableEvents().stream().map(Event::id).toList())
+          .containsExactly("first", "second")
+          .inOrder();
+      assertThat(reloaded.state()).isEqualTo(session.state());
+      assertThat(reloaded.lastUpdateTime()).isEqualTo(session.lastUpdateTime());
+      assertThat(probe.borrowed.get()).isEqualTo(probe.closed.get());
     } finally {
       release.countDown();
       executor.shutdownNow();
